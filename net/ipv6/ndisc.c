@@ -654,7 +654,9 @@ static void ndisc_solicit(struct neighbour *neigh, struct sk_buff *skb)
 	struct in6_addr *target = (struct in6_addr *)&neigh->primary_key;
 	int probes = atomic_read(&neigh->probes);
 
-	if (skb && ipv6_chk_addr(dev_net(dev), &ipv6_hdr(skb)->saddr, dev, 1))
+	if (skb && ipv6_chk_addr_and_flags(dev_net(dev), &ipv6_hdr(skb)->saddr,
+					   dev, 1,
+					   IFA_F_TENTATIVE|IFA_F_OPTIMISTIC))
 		saddr = &ipv6_hdr(skb)->saddr;
 
 	if ((probes -= NEIGH_VAR(neigh->parms, UCAST_PROBES)) < 0) {
@@ -1323,6 +1325,8 @@ skip_linkparms:
 			if (ri->prefix_len == 0 &&
 			    !in6_dev->cnf.accept_ra_defrtr)
 				continue;
+			if (ri->prefix_len < in6_dev->cnf.accept_ra_rt_info_min_plen)
+				continue;
 			if (ri->prefix_len > in6_dev->cnf.accept_ra_rt_info_max_plen)
 				continue;
 			rt6_route_rcv(skb->dev, (u8 *)p, (p->nd_opt_len) << 3,
@@ -1354,7 +1358,7 @@ skip_routeinfo:
 		}
 	}
 
-	if (ndopts.nd_opts_mtu) {
+	if (ndopts.nd_opts_mtu && in6_dev->cnf.accept_ra_mtu) {
 		__be32 n;
 		u32 mtu;
 

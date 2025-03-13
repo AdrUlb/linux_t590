@@ -34,6 +34,7 @@ obj-$(CONFIG_ISL29020)		+= isl29020.o
 obj-$(CONFIG_SENSORS_TSL2550)	+= tsl2550.o
 obj-$(CONFIG_DS1682)		+= ds1682.o
 obj-$(CONFIG_TI_DAC7512)	+= ti_dac7512.o
+obj-$(CONFIG_UID_STAT)		+= uid_stat.o
 obj-$(CONFIG_C2PORT)		+= c2port/
 obj-$(CONFIG_HMC6352)		+= hmc6352.o
 obj-y				+= eeprom/
@@ -53,6 +54,34 @@ obj-$(CONFIG_LATTICE_ECP3_CONFIG)	+= lattice-ecp3-config.o
 obj-$(CONFIG_SRAM)		+= sram.o
 obj-y				+= mic/
 obj-$(CONFIG_GENWQE)		+= genwqe/
+obj-$(CONFIG_QSEECOM) += qseecom.o
+obj-$(CONFIG_PROFILER) += profiler.o
+obj-$(CONFIG_HDCP_QSEECOM) += hdcp.o
+ifdef CONFIG_COMPAT
+obj-$(CONFIG_QSEECOM) += compat_qseecom.o
+endif
 obj-$(CONFIG_ECHO)		+= echo/
 obj-$(CONFIG_VEXPRESS_SYSCFG)	+= vexpress-syscfg.o
 obj-$(CONFIG_CXL_BASE)		+= cxl/
+obj-y				+= qcom/
+obj-$(CONFIG_TI_DRV2667) += ti_drv2667.o
+obj-$(CONFIG_USB_EXT_TYPE_C_PERICOM)	+= type-c-pericom.o
+obj-$(CONFIG_USB_EXT_TYPE_C_TI)		+= type-c-ti.o
+obj-$(CONFIG_QPNP_MISC) 	+= qpnp-misc.o
+obj-$(CONFIG_UID_SYS_STATS) += uid_sys_stats.o
+obj-$(CONFIG_MEMORY_STATE_TIME) += memory_state_time.o
+obj-$(CONFIG_APDS9930)		+= apds993x.o
+# Samsung Jack
+obj-$(CONFIG_SAMSUNG_JACK)	+= sec_jack.o
+obj-$(CONFIG_SEC_MPP_SHARE)	+= sec_mux_sel.o
+
+ifeq ($(TIMA_ENABLED),1)
+obj-$(CONFIG_TIMA)		+= tima_debug_test.o
+obj-$(CONFIG_TIMA_LOG)		+= tima_debug_log.o
+endif
+
+# for DMVerity
+obj-$(CONFIG_DM_VERITY)		+= dmverity_query.o
+
+# for dev-ril-bridge
+obj-$(CONFIG_DEV_RIL_BRIDGE)	+= dev_ril_bridge/

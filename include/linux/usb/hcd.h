@@ -169,7 +169,6 @@ struct usb_hcd {
 	 * bandwidth_mutex should be dropped after a successful control message
 	 * to the device, or resetting the bandwidth after a failed attempt.
 	 */
-	struct mutex		*address0_mutex;
 	struct mutex		*bandwidth_mutex;
 	struct usb_hcd		*shared_hcd;
 	struct usb_hcd		*primary_hcd;
@@ -236,6 +235,8 @@ struct hc_driver {
 #define	HCD_MEMORY	0x0001		/* HC regs use memory (else I/O) */
 #define	HCD_LOCAL_MEM	0x0002		/* HC needs local memory */
 #define	HCD_SHARED	0x0004		/* Two (or more) usb_hcds share HW */
+#define	HCD_RT_OLD_ENUM	0x0008		/* HC supports short enumeration
+					   on root port */
 #define	HCD_USB11	0x0010		/* USB 1.1 */
 #define	HCD_USB2	0x0020		/* USB 2.0 */
 #define	HCD_USB25	0x0030		/* Wireless USB 1.0 (USB 2.5)*/
@@ -382,6 +383,10 @@ struct hc_driver {
 	int	(*disable_usb3_lpm_timeout)(struct usb_hcd *,
 			struct usb_device *, enum usb3_link_state state);
 	int	(*find_raw_port_number)(struct usb_hcd *, int);
+	void	(*log_urb)(struct urb *urb, char *event, unsigned extra);
+	void	(*dump_regs)(struct usb_hcd *);
+	void	(*set_autosuspend_delay)(struct usb_device *);
+	void	(*reset_sof_bug_handler)(struct usb_hcd *hcd, u32 val);
 };
 
 static inline int hcd_giveback_urb_in_bh(struct usb_hcd *hcd)
@@ -429,9 +434,6 @@ extern struct usb_hcd *usb_create_shared_hcd(const struct hc_driver *driver,
 extern struct usb_hcd *usb_get_hcd(struct usb_hcd *hcd);
 extern void usb_put_hcd(struct usb_hcd *hcd);
 extern int usb_hcd_is_primary_hcd(struct usb_hcd *hcd);
-extern int usb_add_hcd(struct usb_hcd *hcd,
-		unsigned int irqnum, unsigned long irqflags);
-extern void usb_remove_hcd(struct usb_hcd *hcd);
 extern int usb_hcd_find_raw_port_number(struct usb_hcd *hcd, int port1);
 
 struct platform_device;
@@ -469,7 +471,7 @@ extern void usb_hc_died(struct usb_hcd *hcd);
 extern void usb_hcd_poll_rh_status(struct usb_hcd *hcd);
 extern void usb_wakeup_notification(struct usb_device *hdev,
 		unsigned int portnum);
-
+extern void usb_flush_hub_wq(void);
 extern void usb_hcd_start_port_resume(struct usb_bus *bus, int portnum);
 extern void usb_hcd_end_port_resume(struct usb_bus *bus, int portnum);
 
@@ -545,9 +547,9 @@ extern void usb_ep0_reinit(struct usb_device *);
 	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 
 #define EndpointRequest \
-	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
+	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 #define EndpointOutRequest \
-	((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
+	((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 
 /* class requests from the USB 2.0 hub spec, table 11-15 */
 /* GetBusState and SetHubDescriptor are optional, omitted */
@@ -631,15 +633,6 @@ extern int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg);
 extern int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg);
 #endif /* CONFIG_PM */
 
-#ifdef CONFIG_PM_RUNTIME
-extern void usb_hcd_resume_root_hub(struct usb_hcd *hcd);
-#else
-static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd)
-{
-	return;
-}
-#endif /* CONFIG_PM_RUNTIME */
-
 /*-------------------------------------------------------------------------*/
 
 #if defined(CONFIG_USB_MON) || defined(CONFIG_USB_MON_MODULE)
@@ -704,6 +697,29 @@ extern struct rw_semaphore ehci_cf_port_reset_rwsem;
 #define USB_OHCI_LOADED		1
 #define USB_EHCI_LOADED		2
 extern unsigned long usb_hcds_loaded;
+
+#ifdef CONFIG_USB
+extern int usb_add_hcd(struct usb_hcd *hcd,
+		unsigned int irqnum, unsigned long irqflags);
+extern void usb_remove_hcd(struct usb_hcd *hcd);
+#ifdef CONFIG_PM_RUNTIME
+extern void usb_hcd_resume_root_hub(struct usb_hcd *hcd);
+#else
+static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd) {}
+#endif /* CONFIG_PM_RUNTIME */
+
+#else  /* CONFIG_USB */
+
+static inline int usb_add_hcd(struct usb_hcd *hcd,
+		unsigned int irqnum, unsigned long irqflags)
+{
+	return 0;
+}
+
+static inline void usb_remove_hcd(struct usb_hcd *hcd) {}
+static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd) {}
+
+#endif /* CONFIG_USB */
 
 #endif /* __KERNEL__ */
 

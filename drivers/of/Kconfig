@@ -1,16 +1,19 @@
 config DTC
 	bool
 
-config OF
-	bool
+menuconfig OF
+	bool "Device Tree and Open Firmware support"
+	help
+	  This option enables the device tree infrastructure.
+	  It is automatically selected by platforms that need it or can
+	  be enabled manually for unittests, overlays or
+	  compile-coverage.
 
-menu "Device Tree and Open Firmware support"
-	depends on OF
+if OF
 
-config OF_SELFTEST
-	bool "Device Tree Runtime self tests"
+config OF_UNITTEST
+	bool "Device Tree runtime unit tests"
 	depends on OF_IRQ && OF_EARLY_FLATTREE
-	select OF_DYNAMIC
 	select OF_RESOLVE
 	help
 	  This option builds in test cases for the device tree infrastructure
@@ -23,6 +26,7 @@ config OF_FLATTREE
 	bool
 	select DTC
 	select LIBFDT
+	select CRC32
 
 config OF_EARLY_FLATTREE
 	bool
@@ -38,7 +42,7 @@ config OF_DYNAMIC
 
 config OF_ADDRESS
 	def_bool y
-	depends on !SPARC
+	depends on !SPARC && HAS_IOMEM
 	select OF_ADDRESS_PCI if PCI
 
 config OF_ADDRESS_PCI
@@ -70,6 +74,12 @@ config OF_PCI_IRQ
 	help
 	  OpenFirmware PCI IRQ routing helpers
 
+config OF_SPMI
+	def_tristate MSM_SPMI
+	depends on MSM_SPMI
+	help
+	  OpenFirmware SPMI bus accessors
+
 config OF_MTD
 	depends on MTD
 	def_bool y
@@ -83,4 +93,26 @@ config OF_RESERVED_MEM
 config OF_RESOLVE
 	bool
 
-endmenu # OF
+config OF_SLIMBUS
+	def_tristate SLIMBUS
+	depends on SLIMBUS
+	help
+	  OpenFirmware SLIMBUS accessors
+
+config OF_CORESIGHT
+	def_bool y
+	depends on CORESIGHT
+	help
+	  OpenFirmware CoreSight accessors
+
+config OF_BATTERYDATA
+	def_bool y
+	help
+	  OpenFirmware BatteryData accessors
+
+config OF_OVERLAY
+	bool "Device Tree overlays"
+	select OF_DYNAMIC
+	select OF_RESOLVE
+
+endif # OF

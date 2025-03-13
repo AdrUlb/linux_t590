@@ -177,7 +177,7 @@ typedef struct {
 	int counter;
 } atomic_t;
 
-#ifdef CONFIG_64BIT
+#if defined(CONFIG_64BIT) && !defined(CONFIG_GENERIC_ATOMIC64)
 typedef struct {
 	long counter;
 } atomic64_t;
@@ -212,6 +212,9 @@ struct callback_head {
 	void (*func)(struct callback_head *head);
 };
 #define rcu_head callback_head
+
+/* clocksource cycle base type */
+typedef u64 cycle_t;
 
 #endif /*  __ASSEMBLY__ */
 #endif /* _LINUX_TYPES_H */

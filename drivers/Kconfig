@@ -20,6 +20,8 @@ source "drivers/block/Kconfig"
 
 source "drivers/misc/Kconfig"
 
+source "drivers/staging/samsung/sec_notifier/Kconfig"
+
 source "drivers/ide/Kconfig"
 
 source "drivers/scsi/Kconfig"
@@ -49,6 +51,10 @@ source "drivers/input/Kconfig"
 source "drivers/char/Kconfig"
 
 source "drivers/i2c/Kconfig"
+
+source "drivers/slimbus/Kconfig"
+
+source "drivers/soundwire/Kconfig"
 
 source "drivers/spi/Kconfig"
 
@@ -100,6 +106,8 @@ source "drivers/memstick/Kconfig"
 
 source "drivers/leds/Kconfig"
 
+source "drivers/switch/Kconfig"
+
 source "drivers/accessibility/Kconfig"
 
 source "drivers/infiniband/Kconfig"
@@ -107,6 +115,8 @@ source "drivers/infiniband/Kconfig"
 source "drivers/edac/Kconfig"
 
 source "drivers/rtc/Kconfig"
+
+source "drivers/esoc/Kconfig"
 
 source "drivers/dma/Kconfig"
 
@@ -131,8 +141,6 @@ source "drivers/xen/Kconfig"
 source "drivers/staging/Kconfig"
 
 source "drivers/platform/Kconfig"
-
-source "drivers/soc/Kconfig"
 
 source "drivers/clk/Kconfig"
 
@@ -168,9 +176,17 @@ source "drivers/irqchip/Kconfig"
 
 source "drivers/ipack/Kconfig"
 
+source "drivers/battery/Kconfig"
+
+source "drivers/battery_v2/Kconfig"
+
+source "drivers/battery_v2_legacy/Kconfig"
+
 source "drivers/reset/Kconfig"
 
 source "drivers/fmc/Kconfig"
+
+source "drivers/coresight/Kconfig"
 
 source "drivers/phy/Kconfig"
 
@@ -181,5 +197,33 @@ source "drivers/mcb/Kconfig"
 source "drivers/ras/Kconfig"
 
 source "drivers/thunderbolt/Kconfig"
+
+source "drivers/sensors/Kconfig"
+
+source "drivers/firmware/Kconfig"
+
+source "drivers/fingerprint/Kconfig"
+
+source "drivers/bif/Kconfig"
+
+source "drivers/muic/Kconfig"
+
+source "drivers/motor/Kconfig"
+
+source "drivers/muic/universal/Kconfig"
+
+source "drivers/nfc/Kconfig"
+
+source "drivers/ccic/Kconfig"
+
+source "drivers/gud/Kconfig"
+
+source "drivers/five/Kconfig"
+
+source "drivers/debug/Kconfig"
+
+source "drivers/security/samsung/icdrv/Kconfig"
+
+source "drivers/security/samsung/tzic/Kconfig"
 
 endmenu

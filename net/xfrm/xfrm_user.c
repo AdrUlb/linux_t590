@@ -382,7 +382,8 @@ static inline int xfrm_replay_verify_len(struct xfrm_replay_state_esn *replay_es
 	ulen = xfrm_replay_state_esn_len(up);
 
 	/* Check the overall length and the internal bitmap length to avoid
-	 * potential overflow. */
+	 * potential overflow.
+         */
 	if (nla_len(rp) < ulen ||
 	    xfrm_replay_state_esn_len(replay_esn) != ulen ||
 	    replay_esn->bmp_len != up->bmp_len)
@@ -390,6 +391,9 @@ static inline int xfrm_replay_verify_len(struct xfrm_replay_state_esn *replay_es
 
 	if (up->replay_window > up->bmp_len * sizeof(__u32) * 8)
 		return -EINVAL;
+
+	if (up->replay_window > up->bmp_len * sizeof(__u32) * 8)
+			return -EINVAL;
 
 	return 0;
 }
@@ -556,6 +560,9 @@ static struct xfrm_state *xfrm_state_construct(struct net *net,
 
 	xfrm_mark_get(attrs, &x->mark);
 
+	if (attrs[XFRMA_OUTPUT_MARK])
+		x->props.output_mark = nla_get_u32(attrs[XFRMA_OUTPUT_MARK]);
+
 	err = __xfrm_init_state(x, false);
 	if (err)
 		goto error;
@@ -599,24 +606,33 @@ static int xfrm_add_sa(struct sk_buff *skb, struct nlmsghdr *nlh,
 	struct km_event c;
 
 	err = verify_newsa_info(p, attrs);
-	if (err)
+	if (err) {
+		pr_err("kp log: verify_newsa_info failed with err [%d]\n", err);
 		return err;
+	}
 
 	x = xfrm_state_construct(net, p, attrs, &err);
-	if (!x)
+	if (!x) {
+		pr_err("kp log: xfrm_state_construct failed with err [%d]\n", err);
 		return err;
+	}
 
 	xfrm_state_hold(x);
-	if (nlh->nlmsg_type == XFRM_MSG_NEWSA)
+	if (nlh->nlmsg_type == XFRM_MSG_NEWSA) {
 		err = xfrm_state_add(x);
-	else
+		pr_err("kp log: xfrm_state_add failed with err [%d]\n", err);
+	}
+	else {
 		err = xfrm_state_update(x);
+		pr_err("kp log: xfrm_state_update failed with err [%d]\n", err);
+	}
 
 	xfrm_audit_state_add(x, err ? 0 : 1, true);
 
 	if (err < 0) {
 		x->km.state = XFRM_STATE_DEAD;
 		__xfrm_state_put(x);
+		pr_err("kp log: updating xfrm state to be dead\n");
 		goto out;
 	}
 
@@ -674,8 +690,10 @@ static int xfrm_del_sa(struct sk_buff *skb, struct nlmsghdr *nlh,
 	struct xfrm_usersa_id *p = nlmsg_data(nlh);
 
 	x = xfrm_user_state_lookup(net, p, attrs, &err);
-	if (x == NULL)
+	if (x == NULL) {
+		pr_err("kp log: xfrm_user_state_lookup failed\n");
 		return err;
+	}
 
 	if ((err = security_xfrm_state_delete(x)) != 0)
 		goto out;
@@ -687,8 +705,10 @@ static int xfrm_del_sa(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 	err = xfrm_state_delete(x);
 
-	if (err < 0)
+	if (err < 0) {
+		pr_err("kp log: xfrm_state_delete failed with err [%d]\n", err);
 		goto out;
+	}
 
 	c.seq = nlh->nlmsg_seq;
 	c.portid = nlh->nlmsg_pid;
@@ -830,6 +850,11 @@ static int copy_to_user_state_extra(struct xfrm_state *x,
 		ret = nla_put(skb, XFRMA_REPLAY_ESN_VAL,
 			      xfrm_replay_state_esn_len(x->replay_esn),
 			      x->replay_esn);
+		if (ret)
+			goto out;
+	}
+	if (x->props.output_mark) {
+		ret = nla_put_u32(skb, XFRMA_OUTPUT_MARK, x->props.output_mark);
 		if (ret)
 			goto out;
 	}
@@ -1369,6 +1394,9 @@ static int validate_tmpl(int nr, struct xfrm_user_tmpl *ut, u16 family)
 		    (ut[i].family != prev_family))
 			return -EINVAL;
 
+		if (ut[i].mode >= XFRM_MODE_MAX)
+			return -EINVAL;
+
 		prev_family = ut[i].family;
 
 		switch (ut[i].family) {
@@ -1510,15 +1538,21 @@ static int xfrm_add_policy(struct sk_buff *skb, struct nlmsghdr *nlh,
 	int excl;
 
 	err = verify_newpolicy_info(p);
-	if (err)
+	if (err) {
+		pr_err("kp log: verify_newpolicy_info failed with err[%d]\n", err);
 		return err;
+	}
 	err = verify_sec_ctx_len(attrs);
-	if (err)
+	if (err) {
+		pr_err("kp log: verify_sec_ctx_len failed with err[%d]\n", err);
 		return err;
+	}
 
 	xp = xfrm_policy_construct(net, p, attrs, &err);
-	if (!xp)
+	if (!xp) {
+		pr_err("kp log: xfrm_policy_construct failed with err[%d]\n", err);
 		return err;
+	}
 
 	/* shouldn't excl be based on nlh flags??
 	 * Aha! this is anti-netlink really i.e  more pfkey derived
@@ -1529,6 +1563,7 @@ static int xfrm_add_policy(struct sk_buff *skb, struct nlmsghdr *nlh,
 	xfrm_audit_policy_add(xp, err ? 0 : 1, true);
 
 	if (err) {
+		pr_err("kp log: xfrm_policy_insert failed with err[%d]\n", err);
 		security_xfrm_policy_free(xp->security);
 		kfree(xp);
 		return err;
@@ -1689,6 +1724,10 @@ static struct sk_buff *xfrm_policy_netlink(struct sk_buff *in_skb,
 	struct sk_buff *skb;
 	int err;
 
+	err = verify_policy_dir(dir);
+	if (err)
+		return ERR_PTR(err);
+
 	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (!skb)
 		return ERR_PTR(-ENOMEM);
@@ -1796,6 +1835,7 @@ static int xfrm_flush_sa(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 	err = xfrm_state_flush(net, p->proto, true);
 	if (err) {
+		pr_err("kp log: xfrm_state_flush failed with err[%d]\n", err);
 		if (err == -ESRCH) /* empty table */
 			return 0;
 		return err;
@@ -1985,6 +2025,7 @@ static int xfrm_flush_policy(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 	err = xfrm_policy_flush(net, type, true);
 	if (err) {
+		pr_err("kp log: xfrm_policy_flush failed with err [%d]\n", err);
 		if (err == -ESRCH) /* empty table */
 			return 0;
 		return err;
@@ -2211,6 +2252,10 @@ static int xfrm_do_migrate(struct sk_buff *skb, struct nlmsghdr *nlh,
 	int n = 0;
 	struct net *net = sock_net(skb->sk);
 
+	err = verify_policy_dir(pi->dir);
+	if (err)
+		return err;
+
 	if (attrs[XFRMA_MIGRATE] == NULL)
 		return -EINVAL;
 
@@ -2325,6 +2370,11 @@ static int xfrm_send_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 {
 	struct net *net = &init_net;
 	struct sk_buff *skb;
+	int err;
+
+	err = verify_policy_dir(dir);
+	if (err)
+		return err;
 
 	skb = nlmsg_new(xfrm_migrate_msgsize(num_migrate, !!k), GFP_ATOMIC);
 	if (skb == NULL)
@@ -2400,6 +2450,7 @@ static const struct nla_policy xfrma_policy[XFRMA_MAX+1] = {
 	[XFRMA_SA_EXTRA_FLAGS]	= { .type = NLA_U32 },
 	[XFRMA_PROTO]		= { .type = NLA_U8 },
 	[XFRMA_ADDRESS_FILTER]	= { .len = sizeof(struct xfrm_address_filter) },
+	[XFRMA_OUTPUT_MARK]	= { .len = NLA_U32 },
 };
 
 static const struct nla_policy xfrma_spd_policy[XFRMA_SPD_MAX+1] = {
@@ -2611,6 +2662,8 @@ static inline size_t xfrm_sa_len(struct xfrm_state *x)
 		l += nla_total_size(sizeof(*x->coaddr));
 	if (x->props.extra_flags)
 		l += nla_total_size(sizeof(x->props.extra_flags));
+	if (x->props.output_mark)
+		l += nla_total_size(sizeof(x->props.output_mark));
 
 	/* Must count x->lastused as it may become non-zero behind our back. */
 	l += nla_total_size(sizeof(u64));
@@ -2972,6 +3025,11 @@ out_free_skb:
 
 static int xfrm_send_policy_notify(struct xfrm_policy *xp, int dir, const struct km_event *c)
 {
+	int err;
+
+	err = verify_policy_dir(dir);
+	if (err)
+		return err;
 
 	switch (c->event) {
 	case XFRM_MSG_NEWPOLICY:

@@ -8,7 +8,10 @@
 #include <asm/thread_info.h>
 #include <asm/memory.h>
 #include <asm/page.h>
-	
+#ifdef CONFIG_ARM_KERNMEM_PERMS
+#include <asm/pgtable.h>
+#endif
+
 #define PROC_INFO							\
 	. = ALIGN(4);							\
 	VMLINUX_SYMBOL(__proc_info_begin) = .;				\
@@ -90,7 +93,19 @@ SECTIONS
 		_text = .;
 		HEAD_TEXT
 	}
+
+#ifdef CONFIG_ARM_KERNMEM_PERMS
+	. = ALIGN(1<<SECTION_SHIFT);
+#endif
+
+#ifdef CONFIG_PROCA
+	_proca_conf_offset = g_proca_config - _stext + 4;
+#else
+	_proca_conf_offset = 0xecefecef; /* Magic number for proca ta	*/
+#endif
+
 	.text : {			/* Real text segment		*/
+		*(.proca_kernel_header.text)
 		_stext = .;		/* Text and read-only data	*/
 			__exception_text_start = .;
 			*(.exception.text)
@@ -111,6 +126,11 @@ SECTIONS
 		*(.got)			/* Global offset table		*/
 			ARM_CPU_KEEP(PROC_INFO)
 	}
+
+#ifdef CONFIG_DEBUG_RODATA
+	. = ALIGN(1<<SECTION_SHIFT);
+#endif
+	_etext = .;			/* End of text section */
 
 	RO_DATA(PAGE_SIZE)
 
@@ -142,10 +162,12 @@ SECTIONS
 
 	NOTES
 
-	_etext = .;			/* End of text and rodata section */
-
 #ifndef CONFIG_XIP_KERNEL
+# ifdef CONFIG_ARM_KERNMEM_PERMS
+	. = ALIGN(1<<SECTION_SHIFT);
+# else
 	. = ALIGN(PAGE_SIZE);
+# endif
 	__init_begin = .;
 #endif
 	/*
@@ -219,8 +241,12 @@ SECTIONS
 	__data_loc = ALIGN(4);		/* location in binary */
 	. = PAGE_OFFSET + TEXT_OFFSET;
 #else
-	. = ALIGN(THREAD_SIZE);
 	__init_end = .;
+#ifdef CONFIG_ARM_KERNMEM_PERMS
+	. = ALIGN(1<<SECTION_SHIFT);
+#else
+	. = ALIGN(THREAD_SIZE);
+#endif
 	__data_loc = .;
 #endif
 

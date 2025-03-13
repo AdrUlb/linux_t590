@@ -344,7 +344,7 @@ static void ftrace_syscall_enter(void *data, struct pt_regs *regs, long id)
 	syscall_get_arguments(current, regs, 0, sys_data->nb_args, entry->args);
 
 	event_trigger_unlock_commit(ftrace_file, buffer, event, entry,
-				    irq_flags, pc);
+				    irq_flags, pc, 0);
 }
 
 static void ftrace_syscall_exit(void *data, struct pt_regs *regs, long ret)
@@ -390,7 +390,7 @@ static void ftrace_syscall_exit(void *data, struct pt_regs *regs, long ret)
 	entry->ret = syscall_get_return_value(current, regs);
 
 	event_trigger_unlock_commit(ftrace_file, buffer, event, entry,
-				    irq_flags, pc);
+				    irq_flags, pc, 0);
 }
 
 static int reg_event_syscall_enter(struct ftrace_event_file *file,
@@ -523,7 +523,7 @@ unsigned long __init __weak arch_syscall_addr(int nr)
 	return (unsigned long)sys_call_table[nr];
 }
 
-static int __init init_ftrace_syscalls(void)
+void __init init_ftrace_syscalls(void)
 {
 	struct syscall_metadata *meta;
 	unsigned long addr;
@@ -533,7 +533,7 @@ static int __init init_ftrace_syscalls(void)
 				    GFP_KERNEL);
 	if (!syscalls_metadata) {
 		WARN_ON(1);
-		return -ENOMEM;
+		return;
 	}
 
 	for (i = 0; i < NR_syscalls; i++) {
@@ -545,10 +545,7 @@ static int __init init_ftrace_syscalls(void)
 		meta->syscall_nr = i;
 		syscalls_metadata[i] = meta;
 	}
-
-	return 0;
 }
-early_initcall(init_ftrace_syscalls);
 
 #ifdef CONFIG_PERF_EVENTS
 

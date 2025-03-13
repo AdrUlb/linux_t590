@@ -24,9 +24,12 @@
 #include <linux/spinlock.h>
 #include <linux/uhid.h>
 #include <linux/wait.h>
+#include <linux/fb.h>
 
 #define UHID_NAME	"uhid"
 #define UHID_BUFSIZE	32
+
+static DEFINE_MUTEX(uhid_open_mutex);
 
 struct uhid_device {
 	struct mutex devlock;
@@ -70,6 +73,7 @@ static void uhid_device_add_worker(struct work_struct *work)
 		uhid->running = false;
 	}
 }
+bool lcd_is_on = true;
 
 static void uhid_queue(struct uhid_device *uhid, struct uhid_event *ev)
 {
@@ -142,15 +146,26 @@ static void uhid_hid_stop(struct hid_device *hid)
 static int uhid_hid_open(struct hid_device *hid)
 {
 	struct uhid_device *uhid = hid->driver_data;
+	int retval = 0;
 
-	return uhid_queue_event(uhid, UHID_OPEN);
+	mutex_lock(&uhid_open_mutex);
+	if (!hid->open++) {
+		retval = uhid_queue_event(uhid, UHID_OPEN);
+		if (retval)
+			hid->open--;
+	}
+	mutex_unlock(&uhid_open_mutex);
+	return retval;
 }
 
 static void uhid_hid_close(struct hid_device *hid)
 {
 	struct uhid_device *uhid = hid->driver_data;
 
-	uhid_queue_event(uhid, UHID_CLOSE);
+	mutex_lock(&uhid_open_mutex);
+	if (!--hid->open)
+		uhid_queue_event(uhid, UHID_CLOSE);
+	mutex_unlock(&uhid_open_mutex);
 }
 
 static int uhid_hid_parse(struct hid_device *hid)
@@ -780,13 +795,43 @@ static struct miscdevice uhid_misc = {
 	.name		= UHID_NAME,
 };
 
+static int fb_state_change(struct notifier_block *nb,
+    unsigned long val, void *data)
+{
+	struct fb_event *evdata = data;
+	unsigned int blank;
+    dbg_hid("fb_state_change");
+	if (val != FB_EVENT_BLANK)
+		return 0;
+
+	blank = *(int *)evdata->data;
+
+	switch (blank) {
+	case FB_BLANK_POWERDOWN:
+		lcd_is_on = false;
+		break;
+	case FB_BLANK_UNBLANK:
+		lcd_is_on = true;
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+static struct notifier_block fb_block = {
+    .notifier_call = fb_state_change,
+};
+
 static int __init uhid_init(void)
 {
+	fb_register_client(&fb_block);
 	return misc_register(&uhid_misc);
 }
 
 static void __exit uhid_exit(void)
 {
+	fb_unregister_client(&fb_block);
 	misc_deregister(&uhid_misc);
 }
 

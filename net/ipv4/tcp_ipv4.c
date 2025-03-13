@@ -189,7 +189,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	if (!inet->inet_saddr)
 		inet->inet_saddr = fl4->saddr;
-	inet->inet_rcv_saddr = inet->inet_saddr;
+	sk_rcv_saddr_set(sk, inet->inet_saddr);
 
 	if (tp->rx_opt.ts_recent_stamp && inet->inet_daddr != daddr) {
 		/* Reset inherited state */
@@ -204,7 +204,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		tcp_fetch_timewait_stamp(sk, &rt->dst);
 
 	inet->inet_dport = usin->sin_port;
-	inet->inet_daddr = daddr;
+	sk_daddr_set(sk, daddr);
 
 	inet_csk(sk)->icsk_ext_hdr_len = 0;
 	if (inet_opt)
@@ -687,6 +687,7 @@ static void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 		arg.bound_dev_if = sk->sk_bound_dev_if;
 
 	arg.tos = ip_hdr(skb)->tos;
+	arg.uid = sock_net_uid(net, sk && sk_fullsock(sk) ? sk : NULL);
 	ip_send_unicast_reply(*this_cpu_ptr(net->ipv4.tcp_sk),
 			      skb, &TCP_SKB_CB(skb)->header.h4.opt,
 			      ip_hdr(skb)->saddr, ip_hdr(skb)->daddr,
@@ -708,7 +709,8 @@ release_sk1:
    outside socket context is ugly, certainly. What can I do?
  */
 
-static void tcp_v4_send_ack(struct sk_buff *skb, u32 seq, u32 ack,
+static void tcp_v4_send_ack(const struct sock *sk, struct sk_buff *skb,
+			    u32 seq, u32 ack,
 			    u32 win, u32 tsval, u32 tsecr, int oif,
 			    struct tcp_md5sig_key *key,
 			    int reply_flags, u8 tos)
@@ -723,7 +725,7 @@ static void tcp_v4_send_ack(struct sk_buff *skb, u32 seq, u32 ack,
 			];
 	} rep;
 	struct ip_reply_arg arg;
-	struct net *net = dev_net(skb_dst(skb)->dev);
+	struct net *net = sock_net(sk);
 
 	memset(&rep.th, 0, sizeof(struct tcphdr));
 	memset(&arg, 0, sizeof(arg));
@@ -772,6 +774,7 @@ static void tcp_v4_send_ack(struct sk_buff *skb, u32 seq, u32 ack,
 	if (oif)
 		arg.bound_dev_if = oif;
 	arg.tos = tos;
+	arg.uid = sock_net_uid(net, sk_fullsock(sk) ? sk : NULL);
 	ip_send_unicast_reply(*this_cpu_ptr(net->ipv4.tcp_sk),
 			      skb, &TCP_SKB_CB(skb)->header.h4.opt,
 			      ip_hdr(skb)->saddr, ip_hdr(skb)->daddr,
@@ -785,7 +788,7 @@ static void tcp_v4_timewait_ack(struct sock *sk, struct sk_buff *skb)
 	struct inet_timewait_sock *tw = inet_twsk(sk);
 	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
 
-	tcp_v4_send_ack(skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
+	tcp_v4_send_ack(sk, skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
 			tcp_time_stamp + tcptw->tw_ts_offset,
 			tcptw->tw_ts_recent,
@@ -804,7 +807,7 @@ static void tcp_v4_reqsk_send_ack(struct sock *sk, struct sk_buff *skb,
 	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
 	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
 	 */
-	tcp_v4_send_ack(skb, (sk->sk_state == TCP_LISTEN) ?
+	tcp_v4_send_ack(sk, skb, (sk->sk_state == TCP_LISTEN) ?
 			tcp_rsk(req)->snt_isn + 1 : tcp_sk(sk)->snd_nxt,
 			tcp_rsk(req)->rcv_nxt, req->rcv_wnd,
 			tcp_time_stamp,
@@ -1323,8 +1326,8 @@ struct sock *tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	newtp		      = tcp_sk(newsk);
 	newinet		      = inet_sk(newsk);
 	ireq		      = inet_rsk(req);
-	newinet->inet_daddr   = ireq->ir_rmt_addr;
-	newinet->inet_rcv_saddr = ireq->ir_loc_addr;
+	sk_daddr_set(newsk, ireq->ir_rmt_addr);
+	sk_rcv_saddr_set(newsk, ireq->ir_loc_addr);
 	newinet->inet_saddr	      = ireq->ir_loc_addr;
 	inet_opt	      = ireq->opt;
 	rcu_assign_pointer(newinet->inet_opt, inet_opt);
@@ -1735,8 +1738,7 @@ do_time_wait:
 							iph->daddr, th->dest,
 							inet_iif(skb));
 		if (sk2) {
-			inet_twsk_deschedule(inet_twsk(sk), &tcp_death_row);
-			inet_twsk_put(inet_twsk(sk));
+			inet_twsk_deschedule_put(inet_twsk(sk));
 			sk = sk2;
 			goto process;
 		}
@@ -2241,6 +2243,7 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i)
 	__be32 src = inet->inet_rcv_saddr;
 	__u16 destp = ntohs(inet->inet_dport);
 	__u16 srcp = ntohs(inet->inet_sport);
+	__u8 state = sk->sk_state;
 	int rx_queue;
 
 	if (icsk->icsk_pending == ICSK_TIME_RETRANS ||
@@ -2259,6 +2262,9 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i)
 		timer_expires = jiffies;
 	}
 
+	if (inet->transparent)
+		state |= 0x80;
+
 	if (sk->sk_state == TCP_LISTEN)
 		rx_queue = sk->sk_ack_backlog;
 	else
@@ -2269,7 +2275,7 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i)
 
 	seq_printf(f, "%4d: %08X:%04X %08X:%04X %02X %08X:%08X %02X:%08lX "
 			"%08X %5u %8d %lu %d %pK %lu %lu %u %u %d",
-		i, src, srcp, dest, destp, sk->sk_state,
+		i, src, srcp, dest, destp, state,
 		tp->write_seq - tp->snd_una,
 		rx_queue,
 		timer_active,
@@ -2291,9 +2297,9 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i)
 static void get_timewait4_sock(const struct inet_timewait_sock *tw,
 			       struct seq_file *f, int i)
 {
+	long delta = tw->tw_timer.expires - jiffies;
 	__be32 dest, src;
 	__u16 destp, srcp;
-	s32 delta = tw->tw_ttd - inet_tw_time_stamp();
 
 	dest  = tw->tw_daddr;
 	src   = tw->tw_rcv_saddr;
@@ -2429,6 +2435,7 @@ struct proto tcp_prot = {
 	.destroy_cgroup		= tcp_destroy_cgroup,
 	.proto_cgroup		= tcp_proto_cgroup,
 #endif
+	.diag_destroy		= tcp_abort,
 };
 EXPORT_SYMBOL(tcp_prot);
 

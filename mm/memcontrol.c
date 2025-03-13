@@ -345,11 +345,6 @@ struct mem_cgroup {
 	 * percpu counter.
 	 */
 	struct mem_cgroup_stat_cpu __percpu *stat;
-	/*
-	 * used when a cpu is offlined or other synchronizations
-	 * See mem_cgroup_read_stat().
-	 */
-	struct mem_cgroup_stat_cpu nocpu_base;
 	spinlock_t pcp_counter_lock;
 
 	atomic_t	dead_count;
@@ -868,15 +863,8 @@ static long mem_cgroup_read_stat(struct mem_cgroup *memcg,
 	long val = 0;
 	int cpu;
 
-	get_online_cpus();
-	for_each_online_cpu(cpu)
+	for_each_possible_cpu(cpu)
 		val += per_cpu(memcg->stat->count[idx], cpu);
-#ifdef CONFIG_HOTPLUG_CPU
-	spin_lock(&memcg->pcp_counter_lock);
-	val += memcg->nocpu_base.count[idx];
-	spin_unlock(&memcg->pcp_counter_lock);
-#endif
-	put_online_cpus();
 	return val;
 }
 
@@ -886,15 +874,8 @@ static unsigned long mem_cgroup_read_events(struct mem_cgroup *memcg,
 	unsigned long val = 0;
 	int cpu;
 
-	get_online_cpus();
-	for_each_online_cpu(cpu)
+	for_each_possible_cpu(cpu)
 		val += per_cpu(memcg->stat->events[idx], cpu);
-#ifdef CONFIG_HOTPLUG_CPU
-	spin_lock(&memcg->pcp_counter_lock);
-	val += memcg->nocpu_base.events[idx];
-	spin_unlock(&memcg->pcp_counter_lock);
-#endif
-	put_online_cpus();
 	return val;
 }
 
@@ -1514,11 +1495,15 @@ static unsigned long mem_cgroup_margin(struct mem_cgroup *memcg)
 
 int mem_cgroup_swappiness(struct mem_cgroup *memcg)
 {
+#if defined(CONFIG_MEMCG_FORCE_USE_VM_SWAPPINESS)
+	return vm_swappiness;
+#else
 	/* root ? */
 	if (mem_cgroup_disabled() || !memcg->css.parent)
 		return vm_swappiness;
 
 	return memcg->swappiness;
+#endif
 }
 
 /*
@@ -2261,11 +2246,11 @@ again:
  * @locked: value received from mem_cgroup_begin_page_stat()
  * @flags: value received from mem_cgroup_begin_page_stat()
  */
-void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool locked,
-			      unsigned long flags)
+void mem_cgroup_end_page_stat(struct mem_cgroup *memcg, bool *locked,
+			      unsigned long *flags)
 {
-	if (memcg && locked)
-		move_unlock_mem_cgroup(memcg, &flags);
+	if (memcg && *locked)
+		move_unlock_mem_cgroup(memcg, flags);
 
 	rcu_read_unlock();
 }
@@ -2454,46 +2439,18 @@ static void drain_all_stock_sync(struct mem_cgroup *root_memcg)
 	mutex_unlock(&percpu_charge_mutex);
 }
 
-/*
- * This function drains percpu counter value from DEAD cpu and
- * move it to local cpu. Note that this function can be preempted.
- */
-static void mem_cgroup_drain_pcp_counter(struct mem_cgroup *memcg, int cpu)
-{
-	int i;
-
-	spin_lock(&memcg->pcp_counter_lock);
-	for (i = 0; i < MEM_CGROUP_STAT_NSTATS; i++) {
-		long x = per_cpu(memcg->stat->count[i], cpu);
-
-		per_cpu(memcg->stat->count[i], cpu) = 0;
-		memcg->nocpu_base.count[i] += x;
-	}
-	for (i = 0; i < MEM_CGROUP_EVENTS_NSTATS; i++) {
-		unsigned long x = per_cpu(memcg->stat->events[i], cpu);
-
-		per_cpu(memcg->stat->events[i], cpu) = 0;
-		memcg->nocpu_base.events[i] += x;
-	}
-	spin_unlock(&memcg->pcp_counter_lock);
-}
-
 static int memcg_cpu_hotplug_callback(struct notifier_block *nb,
 					unsigned long action,
 					void *hcpu)
 {
 	int cpu = (unsigned long)hcpu;
 	struct memcg_stock_pcp *stock;
-	struct mem_cgroup *iter;
 
 	if (action == CPU_ONLINE)
 		return NOTIFY_OK;
 
 	if (action != CPU_DEAD && action != CPU_DEAD_FROZEN)
 		return NOTIFY_OK;
-
-	for_each_mem_cgroup(iter)
-		mem_cgroup_drain_pcp_counter(iter, cpu);
 
 	stock = &per_cpu(memcg_stock, cpu);
 	drain_stock(stock);
@@ -4469,7 +4426,17 @@ static int memcg_stat_show(struct seq_file *m, void *v)
 
 	return 0;
 }
+static u64 mem_cgroup_vmpressure_read(struct cgroup_subsys_state *css,
+				      struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	struct vmpressure *vmpr = memcg_to_vmpressure(memcg);
+	unsigned long vmpressure;
 
+	vmpressure = vmpr->pressure;
+
+	return vmpressure;
+}
 static u64 mem_cgroup_swappiness_read(struct cgroup_subsys_state *css,
 				      struct cftype *cft)
 {
@@ -4483,7 +4450,7 @@ static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
-	if (val > 100)
+	if ((val > 200) || ((val > 100) && !css->parent))
 		return -EINVAL;
 
 	if (css->parent)
@@ -5195,6 +5162,10 @@ static struct cftype mem_cgroup_files[] = {
 	},
 	{
 		.name = "pressure_level",
+	},
+	{
+		.name = "vmpressure",
+		.read_u64 = mem_cgroup_vmpressure_read,
 	},
 #ifdef CONFIG_NUMA
 	{

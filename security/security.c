@@ -20,12 +20,15 @@
 #include <linux/integrity.h>
 #include <linux/ima.h>
 #include <linux/evm.h>
+#include <linux/proca.h>
 #include <linux/fsnotify.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/personality.h>
 #include <linux/backing-dev.h>
+#include <linux/pfk.h>
 #include <net/flow.h>
+#include <linux/task_integrity.h>
 
 #define MAX_LSM_EVM_XATTR	2
 
@@ -135,6 +138,26 @@ int __init register_security(struct security_operations *ops)
 
 /* Security operations */
 
+int security_binder_set_context_mgr(struct task_struct *mgr)
+{
+	return security_ops->binder_set_context_mgr(mgr);
+}
+
+int security_binder_transaction(struct task_struct *from, struct task_struct *to)
+{
+	return security_ops->binder_transaction(from, to);
+}
+
+int security_binder_transfer_binder(struct task_struct *from, struct task_struct *to)
+{
+	return security_ops->binder_transfer_binder(from, to);
+}
+
+int security_binder_transfer_file(struct task_struct *from, struct task_struct *to, struct file *file)
+{
+	return security_ops->binder_transfer_file(from, to, file);
+}
+
 int security_ptrace_access_check(struct task_struct *child, unsigned int mode)
 {
 #ifdef CONFIG_SECURITY_YAMA_STACKED
@@ -221,6 +244,9 @@ int security_bprm_check(struct linux_binprm *bprm)
 	int ret;
 
 	ret = security_ops->bprm_check_security(bprm);
+	if (ret)
+		return ret;
+	ret = five_bprm_check(bprm);
 	if (ret)
 		return ret;
 	return ima_bprm_check(bprm);
@@ -472,6 +498,7 @@ int security_path_chown(struct path *path, kuid_t uid, kgid_t gid)
 		return 0;
 	return security_ops->path_chown(path, uid, gid);
 }
+EXPORT_SYMBOL(security_path_chown);
 
 int security_path_chroot(struct path *path)
 {
@@ -486,6 +513,16 @@ int security_inode_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	return security_ops->inode_create(dir, dentry, mode);
 }
 EXPORT_SYMBOL_GPL(security_inode_create);
+
+int security_inode_post_create(struct inode *dir, struct dentry *dentry,
+			       umode_t mode)
+{
+	if (unlikely(IS_PRIVATE(dir)))
+		return 0;
+	if (security_ops->inode_post_create == NULL)
+		return 0;
+	return security_ops->inode_post_create(dir, dentry, mode);
+}
 
 int security_inode_link(struct dentry *old_dentry, struct inode *dir,
 			 struct dentry *new_dentry)
@@ -602,6 +639,9 @@ int security_inode_setxattr(struct dentry *dentry, const char *name,
 	ret = security_ops->inode_setxattr(dentry, name, value, size, flags);
 	if (ret)
 		return ret;
+	ret = five_inode_setxattr(dentry, name, value, size);
+	if (ret)
+		return ret;
 	ret = ima_inode_setxattr(dentry, name, value, size);
 	if (ret)
 		return ret;
@@ -638,6 +678,9 @@ int security_inode_removexattr(struct dentry *dentry, const char *name)
 	if (unlikely(IS_PRIVATE(dentry->d_inode)))
 		return 0;
 	ret = security_ops->inode_removexattr(dentry, name);
+	if (ret)
+		return ret;
+	ret = five_inode_removexattr(dentry, name);
 	if (ret)
 		return ret;
 	ret = ima_inode_removexattr(dentry, name);
@@ -702,6 +745,9 @@ int security_file_alloc(struct file *file)
 void security_file_free(struct file *file)
 {
 	security_ops->file_free_security(file);
+#ifdef CONFIG_PROCA
+	proca_compat_file_free_security_hook(file);
+#endif
 }
 
 int security_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -728,7 +774,7 @@ static inline unsigned long mmap_prot(struct file *file, unsigned long prot)
 	 * ditto if it's not on noexec mount, except that on !MMU we need
 	 * BDI_CAP_EXEC_MMAP (== VM_MAYEXEC) in this case
 	 */
-	if (!(file->f_path.mnt->mnt_flags & MNT_NOEXEC)) {
+	if (!path_noexec(&file->f_path)) {
 #ifndef CONFIG_MMU
 		unsigned long caps = 0;
 		struct address_space *mapping = file->f_mapping;
@@ -749,6 +795,9 @@ int security_mmap_file(struct file *file, unsigned long prot,
 	int ret;
 	ret = security_ops->mmap_file(file, prot,
 					mmap_prot(file, prot), flags);
+	if (ret)
+		return ret;
+	ret = five_file_mmap(file, prot);
 	if (ret)
 		return ret;
 	return ima_file_mmap(file, prot);
@@ -799,7 +848,21 @@ int security_file_open(struct file *file, const struct cred *cred)
 	if (ret)
 		return ret;
 
-	return fsnotify_perm(file, MAY_OPEN);
+	ret = fsnotify_perm(file, MAY_OPEN);
+	if (ret)
+		return ret;
+
+	return five_file_open(file);
+}
+
+bool security_allow_merge_bio(struct bio *bio1, struct bio *bio2)
+{
+	bool ret = pfk_allow_merge_bio(bio1, bio2);
+
+	if (security_ops->allow_merge_bio)
+		ret = ret && security_ops->allow_merge_bio(bio1, bio2);
+
+	return ret;
 }
 
 int security_task_create(unsigned long clone_flags)
@@ -813,6 +876,10 @@ void security_task_free(struct task_struct *task)
 	yama_task_free(task);
 #endif
 	security_ops->task_free(task);
+	five_task_free(task);
+#ifdef CONFIG_PROCA
+	proca_compat_task_free_hook(task);
+#endif
 }
 
 int security_cred_alloc_blank(struct cred *cred, gfp_t gfp)

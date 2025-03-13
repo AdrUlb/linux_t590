@@ -21,20 +21,60 @@
 #include <linux/bitops.h>
 #include <linux/elf.h>
 #include <linux/gfp.h>
+#include <linux/kasan.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/moduleloader.h>
 #include <linux/vmalloc.h>
+#include <asm/alternative.h>
 #include <asm/insn.h>
+#include <linux/random.h>
+#include <asm/sections.h>
 
 #define	AARCH64_INSN_IMM_MOVNZ		AARCH64_INSN_IMM_MAX
 #define	AARCH64_INSN_IMM_MOVK		AARCH64_INSN_IMM_16
 
+
+#ifdef  CONFIG_RELOCATABLE_KERNEL
+int randomize_module_space __read_mostly =  1; 
+#define RANDOMIZE_MODULE_REGION  (1*1024*1024)
+#endif
+
+
 void *module_alloc(unsigned long size)
 {
-	return __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,
-				    GFP_KERNEL, PAGE_KERNEL_EXEC, NUMA_NO_NODE,
-				    __builtin_return_address(0));
+	void *p;
+#ifdef CONFIG_RELOCATABLE_KERNEL
+	static unsigned long module_va = 0; 
+	/* random address is 16K ALIGN and will have 16MB shift spaces, this will reduce the avaliable memory space for modules */
+	if(module_va == 0) {
+		module_va = MODULES_VADDR; 
+		if (randomize_module_space)
+			module_va += ALIGN( get_random_int() %  RANDOMIZE_MODULE_REGION, PAGE_SIZE * 4); 
+	}
+
+	p = __vmalloc_node_range(size, MODULE_ALIGN, module_va, MODULES_END,
+				    GFP_KERNEL, PAGE_KERNEL_EXEC, 0, 
+				    NUMA_NO_NODE, __builtin_return_address(0));
+	
+	if (p && (kasan_module_alloc(p, size) < 0)) {
+		vfree(p);
+		return NULL;
+	}
+
+	return p;
+#else
+	p = __vmalloc_node_range(size, MODULE_ALIGN, MODULES_VADDR, MODULES_END,
+				GFP_KERNEL, PAGE_KERNEL_EXEC, 0,
+				NUMA_NO_NODE, __builtin_return_address(0));
+
+	if (p && (kasan_module_alloc(p, size) < 0)) {
+		vfree(p);
+		return NULL;
+	}
+
+	return p;
+#endif
 }
 
 enum aarch64_reloc_op {
@@ -395,4 +435,21 @@ overflow:
 	pr_err("module %s: overflow in relocation type %d val %Lx\n",
 	       me->name, (int)ELF64_R_TYPE(rel[i].r_info), val);
 	return -ENOEXEC;
+}
+
+int module_finalize(const Elf_Ehdr *hdr,
+		    const Elf_Shdr *sechdrs,
+		    struct module *me)
+{
+	const Elf_Shdr *s, *se;
+	const char *secstrs = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
+
+	for (s = sechdrs, se = sechdrs + hdr->e_shnum; s < se; s++) {
+		if (strcmp(".altinstructions", secstrs + s->sh_name) == 0) {
+			apply_alternatives((void *)s->sh_addr, s->sh_size);
+			return 0;
+		}
+	}
+
+	return 0;
 }

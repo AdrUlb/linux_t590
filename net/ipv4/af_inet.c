@@ -89,6 +89,7 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/netfilter/xt_qtaguid.h>
 
 #include <asm/uaccess.h>
 
@@ -119,6 +120,21 @@
 #include <linux/mroute.h>
 #endif
 
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+#include <linux/android_aid.h>
+
+static inline int current_has_network(void)
+{
+	return in_egroup_p(AID_INET) || capable(CAP_NET_RAW);
+}
+#else
+static inline int current_has_network(void)
+{
+	return 1;
+}
+#endif
+
+int sysctl_reserved_port_bind __read_mostly = 1;
 
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
@@ -259,6 +275,9 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	int try_loading_module = 0;
 	int err;
 
+	if (!current_has_network())
+		return -EACCES;
+
 	if (protocol < 0 || protocol >= IPPROTO_MAX)
 		return -EINVAL;
 
@@ -310,8 +329,7 @@ lookup_protocol:
 	}
 
 	err = -EPERM;
-	if (sock->type == SOCK_RAW && !kern &&
-	    !ns_capable(net->user_ns, CAP_NET_RAW))
+	if (sock->type == SOCK_RAW && !kern && !capable(CAP_NET_RAW))
 		goto out_rcu_unlock;
 
 	sock->ops = answer->ops;
@@ -387,7 +405,6 @@ out_rcu_unlock:
 	goto out;
 }
 
-
 /*
  *	The peer socket should always be NULL (or else). When we call this
  *	function we are destroying the object and from then on nobody
@@ -400,6 +417,9 @@ int inet_release(struct socket *sock)
 	if (sk) {
 		long timeout;
 
+#ifdef CONFIG_NETFILTER_XT_MATCH_QTAGUID
+		qtaguid_untag(sock, true);
+#endif
 		sock_rps_reset_flow(sk);
 
 		/* Applications forget to leave groups before exiting */
@@ -727,6 +747,7 @@ int inet_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 		 size_t size)
 {
 	struct sock *sk = sock->sk;
+	int err;
 
 	sock_rps_record_flow(sk);
 
@@ -735,7 +756,9 @@ int inet_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-	return sk->sk_prot->sendmsg(iocb, sk, msg, size);
+    err = sk->sk_prot->sendmsg(iocb, sk, msg, size);
+
+	return err;
 }
 EXPORT_SYMBOL(inet_sendmsg);
 
@@ -768,8 +791,9 @@ int inet_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 
 	err = sk->sk_prot->recvmsg(iocb, sk, msg, size, flags & MSG_DONTWAIT,
 				   flags & ~MSG_DONTWAIT, &addr_len);
-	if (err >= 0)
+	if (err >= 0) {
 		msg->msg_namelen = addr_len;
+	}
 	return err;
 }
 EXPORT_SYMBOL(inet_recvmsg);
@@ -1336,6 +1360,7 @@ static struct sk_buff **inet_gro_receive(struct sk_buff **head,
 
 	for (p = *head; p; p = p->next) {
 		struct iphdr *iph2;
+		u16 flush_id;
 
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
@@ -1359,14 +1384,24 @@ static struct sk_buff **inet_gro_receive(struct sk_buff **head,
 			(iph->tos ^ iph2->tos) |
 			((iph->frag_off ^ iph2->frag_off) & htons(IP_DF));
 
-		/* Save the IP ID check to be included later when we get to
-		 * the transport layer so only the inner most IP ID is checked.
-		 * This is because some GSO/TSO implementations do not
-		 * correctly increment the IP ID for the outer hdrs.
-		 */
-		NAPI_GRO_CB(p)->flush_id =
-			    ((u16)(ntohs(iph2->id) + NAPI_GRO_CB(p)->count) ^ id);
 		NAPI_GRO_CB(p)->flush |= flush;
+
+		/* We must save the offset as it is possible to have multiple
+		 * flows using the same protocol and address pairs so we
+		 * need to wait until we can validate this is part of the
+		 * same flow with a 5-tuple or better to avoid unnecessary
+		 * collisions between flows.  We can support one of two
+		 * possible scenarios, either a fixed value with DF bit set
+		 * or an incrementing value with DF either set or unset.
+		 * In the case of a fixed value we will end up losing the
+		 * data that the IP ID was a fixed value, however per RFC
+		 * 6864 in such a case the actual value of the IP ID is
+		 * meant to be ignored anyway.
+		 */
+		flush_id = (u16)(id - ntohs(iph2->id));
+		if (flush_id || !(iph2->frag_off & htons(IP_DF)))
+			NAPI_GRO_CB(p)->flush_id |= flush_id ^
+						    NAPI_GRO_CB(p)->count;
 	}
 
 	NAPI_GRO_CB(skb)->flush |= flush;
@@ -1381,7 +1416,7 @@ static struct sk_buff **inet_gro_receive(struct sk_buff **head,
 	skb_gro_pull(skb, sizeof(*iph));
 	skb_set_transport_header(skb, skb_gro_offset(skb));
 
-	pp = ops->callbacks.gro_receive(head, skb);
+	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
 
 out_unlock:
 	rcu_read_unlock();

@@ -34,82 +34,6 @@
 #include "tick-internal.h"
 #include "timekeeping_internal.h"
 
-void timecounter_init(struct timecounter *tc,
-		      const struct cyclecounter *cc,
-		      u64 start_tstamp)
-{
-	tc->cc = cc;
-	tc->cycle_last = cc->read(cc);
-	tc->nsec = start_tstamp;
-}
-EXPORT_SYMBOL_GPL(timecounter_init);
-
-/**
- * timecounter_read_delta - get nanoseconds since last call of this function
- * @tc:         Pointer to time counter
- *
- * When the underlying cycle counter runs over, this will be handled
- * correctly as long as it does not run over more than once between
- * calls.
- *
- * The first call to this function for a new time counter initializes
- * the time tracking and returns an undefined result.
- */
-static u64 timecounter_read_delta(struct timecounter *tc)
-{
-	cycle_t cycle_now, cycle_delta;
-	u64 ns_offset;
-
-	/* read cycle counter: */
-	cycle_now = tc->cc->read(tc->cc);
-
-	/* calculate the delta since the last timecounter_read_delta(): */
-	cycle_delta = (cycle_now - tc->cycle_last) & tc->cc->mask;
-
-	/* convert to nanoseconds: */
-	ns_offset = cyclecounter_cyc2ns(tc->cc, cycle_delta);
-
-	/* update time stamp of timecounter_read_delta() call: */
-	tc->cycle_last = cycle_now;
-
-	return ns_offset;
-}
-
-u64 timecounter_read(struct timecounter *tc)
-{
-	u64 nsec;
-
-	/* increment time by nanoseconds since last call */
-	nsec = timecounter_read_delta(tc);
-	nsec += tc->nsec;
-	tc->nsec = nsec;
-
-	return nsec;
-}
-EXPORT_SYMBOL_GPL(timecounter_read);
-
-u64 timecounter_cyc2time(struct timecounter *tc,
-			 cycle_t cycle_tstamp)
-{
-	u64 cycle_delta = (cycle_tstamp - tc->cycle_last) & tc->cc->mask;
-	u64 nsec;
-
-	/*
-	 * Instead of always treating cycle_tstamp as more recent
-	 * than tc->cycle_last, detect when it is too far in the
-	 * future and treat it as old time stamp instead.
-	 */
-	if (cycle_delta > tc->cc->mask / 2) {
-		cycle_delta = (tc->cycle_last - cycle_tstamp) & tc->cc->mask;
-		nsec = tc->nsec - cyclecounter_cyc2ns(tc->cc, cycle_delta);
-	} else {
-		nsec = cyclecounter_cyc2ns(tc->cc, cycle_delta) + tc->nsec;
-	}
-
-	return nsec;
-}
-EXPORT_SYMBOL_GPL(timecounter_cyc2time);
-
 /**
  * clocks_calc_mult_shift - calculate mult/shift factors for scaled math of clocks
  * @mult:	pointer to mult variable
@@ -182,7 +106,7 @@ static int finished_booting;
 
 #ifdef CONFIG_CLOCKSOURCE_WATCHDOG
 static void clocksource_watchdog_work(struct work_struct *work);
-static void clocksource_select(void);
+static void clocksource_select(bool force);
 
 static LIST_HEAD(watchdog_list);
 static struct clocksource *watchdog;
@@ -459,7 +383,7 @@ static int clocksource_watchdog_kthread(void *data)
 {
 	mutex_lock(&clocksource_mutex);
 	if (__clocksource_watchdog_kthread())
-		clocksource_select();
+		clocksource_select(false);
 	mutex_unlock(&clocksource_mutex);
 	return 0;
 }
@@ -600,11 +524,12 @@ static u64 clocksource_max_deferment(struct clocksource *cs)
 
 #ifndef CONFIG_ARCH_USES_GETTIMEOFFSET
 
-static struct clocksource *clocksource_find_best(bool oneshot, bool skipcur)
+static struct clocksource *clocksource_find_best(bool oneshot, bool skipcur,
+						bool force)
 {
 	struct clocksource *cs;
 
-	if (!finished_booting || list_empty(&clocksource_list))
+	if ((!finished_booting && !force) || list_empty(&clocksource_list))
 		return NULL;
 
 	/*
@@ -622,13 +547,13 @@ static struct clocksource *clocksource_find_best(bool oneshot, bool skipcur)
 	return NULL;
 }
 
-static void __clocksource_select(bool skipcur)
+static void __clocksource_select(bool skipcur, bool force)
 {
 	bool oneshot = tick_oneshot_mode_active();
 	struct clocksource *best, *cs;
 
 	/* Find the best suitable clocksource */
-	best = clocksource_find_best(oneshot, skipcur);
+	best = clocksource_find_best(oneshot, skipcur, force);
 	if (!best)
 		return;
 
@@ -669,22 +594,39 @@ static void __clocksource_select(bool skipcur)
  * Select the clocksource with the best rating, or the clocksource,
  * which is selected by userspace override.
  */
-static void clocksource_select(void)
+static void clocksource_select(bool force)
 {
-	return __clocksource_select(false);
+	return __clocksource_select(false, force);
 }
 
 static void clocksource_select_fallback(void)
 {
-	return __clocksource_select(true);
+	return __clocksource_select(true, false);
 }
 
 #else /* !CONFIG_ARCH_USES_GETTIMEOFFSET */
 
-static inline void clocksource_select(void) { }
+static inline void clocksource_select(bool force) { }
 static inline void clocksource_select_fallback(void) { }
 
 #endif
+
+/**
+ * clocksource_select_force - Force re-selection of the best clocksource
+ *				among registered clocksources
+ *
+ * clocksource_select() can't select the best clocksource before
+ * calling clocksource_done_booting() and since clocksource_select()
+ * should be called with clocksource_mutex held, provide a new API
+ * can be called from other files to select best clockrouce irrespective
+ * of finished_booting flag.
+ */
+void clocksource_select_force(void)
+{
+	mutex_lock(&clocksource_mutex);
+	clocksource_select(true);
+	mutex_unlock(&clocksource_mutex);
+}
 
 /*
  * clocksource_done_booting - Called near the end of core bootup
@@ -702,7 +644,7 @@ static int __init clocksource_done_booting(void)
 	 * Run the watchdog first to eliminate unstable clock sources
 	 */
 	__clocksource_watchdog_kthread();
-	clocksource_select();
+	clocksource_select(false);
 	mutex_unlock(&clocksource_mutex);
 	return 0;
 }
@@ -796,7 +738,7 @@ int __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq)
 	mutex_lock(&clocksource_mutex);
 	clocksource_enqueue(cs);
 	clocksource_enqueue_watchdog(cs);
-	clocksource_select();
+	clocksource_select(false);
 	mutex_unlock(&clocksource_mutex);
 	return 0;
 }
@@ -823,7 +765,7 @@ int clocksource_register(struct clocksource *cs)
 	mutex_lock(&clocksource_mutex);
 	clocksource_enqueue(cs);
 	clocksource_enqueue_watchdog(cs);
-	clocksource_select();
+	clocksource_select(false);
 	mutex_unlock(&clocksource_mutex);
 	return 0;
 }
@@ -845,7 +787,7 @@ void clocksource_change_rating(struct clocksource *cs, int rating)
 {
 	mutex_lock(&clocksource_mutex);
 	__clocksource_change_rating(cs, rating);
-	clocksource_select();
+	clocksource_select(false);
 	mutex_unlock(&clocksource_mutex);
 }
 EXPORT_SYMBOL(clocksource_change_rating);
@@ -948,7 +890,7 @@ static ssize_t sysfs_override_clocksource(struct device *dev,
 
 	ret = sysfs_get_uname(buf, override_name, count);
 	if (ret >= 0)
-		clocksource_select();
+		clocksource_select(false);
 
 	mutex_unlock(&clocksource_mutex);
 

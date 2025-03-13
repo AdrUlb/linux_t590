@@ -48,8 +48,12 @@
 #include <linux/nodemask.h>
 #include <linux/moduleparam.h>
 #include <linux/uaccess.h>
+#include <linux/bug.h>
 
 #include "workqueue_internal.h"
+
+#include <linux/sec_debug.h>
+
 
 enum {
 	/*
@@ -1728,9 +1732,7 @@ static struct worker *create_worker(struct worker_pool *pool)
 		goto fail;
 
 	set_user_nice(worker->task, pool->attrs->nice);
-
-	/* prevent userland from meddling with cpumask of workqueue workers */
-	worker->task->flags |= PF_NO_SETAFFINITY;
+	kthread_bind_mask(worker->task, pool->attrs->cpumask);
 
 	/* successful, attach the worker to the pool */
 	worker_attach_to_pool(worker, pool);
@@ -2041,6 +2043,13 @@ __acquires(&pool->lock)
 	lock_map_acquire_read(&pwq->wq->lockdep_map);
 	lock_map_acquire(&lockdep_map);
 	trace_workqueue_execute_start(work);
+
+	if ((unsigned long)worker->current_func > PAGE_OFFSET)
+		secdbg_sched_msg("@%pS", worker->current_func);
+	else
+		secdbg_sched_msg("M:0x%lx",
+				(unsigned long)worker->current_func);
+
 	worker->current_func(work);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
@@ -2056,6 +2065,7 @@ __acquires(&pool->lock)
 		       current->comm, preempt_count(), task_pid_nr(current),
 		       worker->current_func);
 		debug_show_held_locks(current);
+		BUG_ON(PANIC_CORRUPTION);
 		dump_stack();
 	}
 
@@ -4151,7 +4161,7 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 		}
 
 		wq->rescuer = rescuer;
-		rescuer->task->flags |= PF_NO_SETAFFINITY;
+		kthread_bind_mask(rescuer->task, cpu_possible_mask);
 		wake_up_process(rescuer->task);
 	}
 
@@ -4537,10 +4547,13 @@ static void wq_unbind_fn(struct work_struct *work)
 /**
  * rebind_workers - rebind all workers of a pool to the associated CPU
  * @pool: pool of interest
+ * @force: if it is true, replace WORKER_UNBOUND with WORKER_REBOUND
+ * irrespective of flags of workers. Otherwise, replace the flags only
+ * when workers have WORKER_UNBOUND flag.
  *
  * @pool->cpu is coming online.  Rebind all workers to the CPU.
  */
-static void rebind_workers(struct worker_pool *pool)
+static void rebind_workers(struct worker_pool *pool, bool force)
 {
 	struct worker *worker;
 
@@ -4600,10 +4613,12 @@ static void rebind_workers(struct worker_pool *pool)
 		 * fail incorrectly leading to premature concurrency
 		 * management operations.
 		 */
-		WARN_ON_ONCE(!(worker_flags & WORKER_UNBOUND));
-		worker_flags |= WORKER_REBOUND;
-		worker_flags &= ~WORKER_UNBOUND;
-		ACCESS_ONCE(worker->flags) = worker_flags;
+		if (force || (worker_flags & WORKER_UNBOUND)) {
+			WARN_ON_ONCE(!(worker_flags & WORKER_UNBOUND));
+			worker_flags |= WORKER_REBOUND;
+			worker_flags &= ~WORKER_UNBOUND;
+			ACCESS_ONCE(worker->flags) = worker_flags;
+		}
 	}
 
 	spin_unlock_irq(&pool->lock);
@@ -4672,7 +4687,9 @@ static int workqueue_cpu_up_callback(struct notifier_block *nfb,
 			mutex_lock(&pool->attach_mutex);
 
 			if (pool->cpu == cpu)
-				rebind_workers(pool);
+				rebind_workers(pool,
+					(action & ~CPU_TASKS_FROZEN)
+						!= CPU_DOWN_FAILED);
 			else if (pool->cpu < 0)
 				restore_unbound_workers_cpumask(pool, cpu);
 
